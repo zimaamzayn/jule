@@ -7,25 +7,20 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// --- Dexie Setup ---
-import Dexie from 'https://unpkg.com/dexie@4.0.8/dist/dexie.mjs';
-
-const db = new Dexie('MedFlashDB');
-db.version(3).stores({
-  decks: '++id, title, parentId',
-  cards: '++id, deckId, due, stability, difficulty, state, type, front, back, content, summary, question, answer, explanation, tags, image, occlusionBoxes, activeBoxIndex',
-  reviews: '++id, cardId, rating, timestamp, interval',
-  sessions: '++id, start, end, cardCount'
-});
-
-// --- FSRS 4.5 Parameters ---
-const FSRS_W = [0.4, 0.6, 2.4, 5.8, 4.93, 0.94, 0.86, 0.01, 1.49, 0.14, 0.94, 2.18, 0.05, 0.34, 1.26, 0.26, 2.05];
+import { db } from './modules/db.js';
+import { calculateNextReview } from './modules/fsrs.js';
+import { renderCard } from './modules/card-renderer.js';
+import { showToast, showView } from './modules/ui.js';
 
 // --- State ---
 let activeCard = null;
 let activeCardId = null;
 let sessionStart = Date.now();
 let activeView = 'study';
+let activeDeckId = null;
+let activeEditingCardId = null;
+let activeDeckAction = null;
+let activeDeckIdAction = null;
 
 // --- Canvas State for Occlusion ---
 let occlusionCanvas = null;
@@ -37,157 +32,6 @@ let occlusionStartX = 0;
 let occlusionStartY = 0;
 let occlusionCurrentX = 0;
 let occlusionCurrentY = 0;
-
-// --- UI ---
-function showToast(message) {
-  const toast = document.getElementById('toast');
-  toast.textContent = message;
-  toast.classList.add('show');
-  setTimeout(() => toast.classList.remove('show'), 3000);
-}
-
-// --- Theme ---
-const themeToggle = document.getElementById('theme-toggle');
-const savedTheme = localStorage.getItem('theme') || 'light';
-document.documentElement.setAttribute('data-theme', savedTheme);
-updateThemeIcon();
-
-themeToggle.addEventListener('click', () => {
-  const newTheme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', newTheme);
-  localStorage.setItem('theme', newTheme);
-  updateThemeIcon();
-});
-
-function updateThemeIcon() {
-  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  themeToggle.innerHTML = `<ion-icon name="${isDark ? 'sunny-outline' : 'moon-outline'}"></ion-icon>`;
-}
-
-// --- FSRS Logic ---
-function nextInterval(stability) {
-  return Math.max(1, Math.round(stability));
-}
-
-function calculateNextReview(card, rating) {
-  const now = Date.now();
-  const state = card.state || 0;
-
-  if (state === 0) {
-    card.stability = FSRS_W[rating - 1];
-    card.difficulty = Math.min(10, Math.max(1, FSRS_W[4] - (rating - 3) * FSRS_W[5]));
-    card.state = 1;
-    card.due = now + 86400000;
-  } else {
-    const elapsedDays = (now - (card.lastReview || now)) / 86400000;
-    card.difficulty = Math.min(10, Math.max(1, card.difficulty - FSRS_W[6] * (rating - 3)));
-
-    if (rating === 1) {
-      card.stability = FSRS_W[7] * Math.pow(card.difficulty, -FSRS_W[8]) * (Math.pow(card.stability + 1, FSRS_W[9]) - 1);
-      card.due = now;
-      card.state = 3;
-    } else {
-      card.stability = card.stability * (1 + Math.exp(FSRS_W[10]) * (11 - card.difficulty) * Math.pow(card.stability + 1, -FSRS_W[11]));
-      const interval = nextInterval(card.stability);
-      card.due = now + interval * 86400000;
-      card.state = 2;
-    }
-  }
-  card.lastReview = now;
-  return card;
-}
-
-// --- Card Rendering ---
-function renderCard(card, isBack = false) {
-  const frontEl = document.getElementById('front-content');
-  const backEl = document.getElementById('back-content');
-
-  if (card.type === 'cloze') {
-    const regex = /{{c\d+::(.*?)}}/g;
-    const q = card.content.replace(regex, '<span class="cloze-box">[...]</span>');
-    const a = card.content.replace(regex, '<span class="cloze-highlight">$1</span>');
-    frontEl.innerHTML = q;
-    backEl.innerHTML = a;
-  } else if (card.type === 'occlusion') {
-    const img = new Image();
-    img.src = card.image;
-
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
-
-      card.occlusionBoxes.forEach((box, i) => {
-        if (isBack && i === (card.activeBoxIndex || 0)) {
-          // reveal
-        } else {
-          ctx.fillStyle = 'rgba(255, 82, 82, 0.85)';
-          ctx.fillRect(box.x, box.y, box.w, box.h);
-        }
-      });
-
-      const dataUrl = canvas.toDataURL('image/webp', 0.8);
-      const imgEl = document.createElement('img');
-      imgEl.src = dataUrl;
-      imgEl.style.maxWidth = '100%';
-      imgEl.style.height = 'auto';
-
-      const container = document.createElement('div');
-      container.appendChild(imgEl);
-      if (isBack) {
-        const label = document.createElement('p');
-        label.textContent = 'Tapped area revealed';
-        label.style.marginTop = '10px';
-        label.style.fontSize = '0.9rem';
-        label.style.color = '#666';
-        container.appendChild(label);
-      }
-
-      if (isBack) {
-        backEl.innerHTML = '';
-        backEl.appendChild(container);
-      } else {
-        frontEl.innerHTML = '';
-        frontEl.appendChild(container);
-      }
-
-      // Render LaTeX
-      if (typeof MathJax !== 'undefined') {
-        MathJax.typesetClear([frontEl, backEl]);
-        MathJax.typeset([frontEl, backEl]);
-      }
-    };
-  } else if (card.type === 'clinical') {
-    if (isBack) {
-      backEl.innerHTML = `
-        <div class="clinical-card">
-          <div class="clinical-section"><strong>Summary:</strong> ${card.summary}</div>
-          <div class="clinical-section"><strong>Q:</strong> ${card.question}</div>
-          <div class="clinical-section"><strong>A:</strong> ${card.answer}</div>
-          ${card.explanation ? `<div class="clinical-section"><strong>Explanation:</strong> ${card.explanation}</div>` : ''}
-        </div>
-      `;
-    } else {
-      frontEl.innerHTML = `
-        <div class="clinical-card">
-          <div class="clinical-section"><strong>Summary:</strong> ${card.summary}</div>
-          <div class="clinical-section"><strong>Question:</strong> ${card.question}</div>
-        </div>
-      `;
-    }
-  } else {
-    frontEl.textContent = card.front || '';
-    backEl.textContent = card.back || '';
-  }
-
-  // Render LaTeX for non-occlusion
-  if (card.type !== 'occlusion' && typeof MathJax !== 'undefined') {
-    MathJax.typesetClear([frontEl, backEl]);
-    MathJax.typeset([frontEl, backEl]);
-  }
-}
 
 // --- Load Next Card ---
 async function loadNextCard() {
@@ -201,7 +45,7 @@ async function loadNextCard() {
     .where('state').equals(0)
     .and(card => card.due >= todayStart)
     .count();
-  
+
   const reviewsToday = await db.reviews
     .where('timestamp').above(todayStart.getTime())
     .count();
@@ -261,7 +105,7 @@ document.getElementById('card-inner').addEventListener('click', () => {
   const cardEl = document.getElementById('card-inner');
   const controls = document.getElementById('rating-controls');
   const isFlipped = cardEl.classList.contains('is-flipped');
-  
+
   if (!isFlipped) {
     cardEl.classList.add('is-flipped');
     controls.classList.add('active');
@@ -278,37 +122,12 @@ document.querySelectorAll('.rate-btn').forEach(btn => {
   });
 });
 
-// --- Navigation ---
-function showView(viewName) {
-  document.querySelectorAll('.nav-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.view === viewName);
-  });
-  document.querySelectorAll('.view').forEach(el => {
-    el.classList.toggle('active', el.id === viewName + '-view');
-  });
-  activeView = viewName;
-
-  if (viewName === 'decks') {
-    loadDecksList();
-  } else if (viewName === 'add') {
-    loadDecksIntoSelect();
-  } else if (viewName === 'stats') {
-    setTimeout(loadStatsDashboard, 300);
-  }
-}
-
-document.querySelectorAll('.nav-item').forEach(item => {
-  item.addEventListener('click', () => {
-    showView(item.dataset.view);
-  });
-});
-
 // --- Decks View ---
 async function loadDecksList() {
   const tagFilter = document.getElementById('tag-filter')?.value.trim().toLowerCase() || null;
   const decks = await db.decks.toArray();
   const listEl = document.getElementById('decks-list');
-  
+
   if (decks.length === 0) {
     listEl.innerHTML = '<p>No decks yet. Tap + to create one.</p>';
     return;
@@ -320,7 +139,14 @@ async function loadDecksList() {
         <div class="deck-title">${deck.title}</div>
         <div class="deck-count">Loading...</div>
       </div>
-      <ion-icon name="chevron-forward-outline"></ion-icon>
+      <div class="deck-actions">
+        <button class="btn-icon edit-deck-btn" data-deck-id="${deck.id}" title="Edit Deck">
+          <ion-icon name="create-outline"></ion-icon>
+        </button>
+        <button class="btn-icon delete-deck-btn" data-deck-id="${deck.id}" title="Delete Deck">
+          <ion-icon name="trash-outline"></ion-icon>
+        </button>
+      </div>
     </div>
   `).join('');
 
@@ -330,7 +156,34 @@ async function loadDecksList() {
       countQuery = countQuery.and(card => card.tags && card.tags.includes(tagFilter));
     }
     const count = await countQuery.count();
-    document.querySelector(`.deck-item[data-deck-id="${deck.id}"] .deck-count`).textContent = `${count} cards`;
+    const deckCountEl = document.querySelector(`.deck-item[data-deck-id="${deck.id}"] .deck-count`);
+    if (deckCountEl) {
+      deckCountEl.textContent = `${count} cards`;
+    }
+  });
+
+  listEl.querySelectorAll('.deck-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const deckId = parseInt(item.dataset.deckId);
+      showBrowseView(deckId);
+    });
+  });
+
+  // Add event listeners for edit and delete buttons
+  listEl.querySelectorAll('.edit-deck-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const deckId = parseInt(btn.dataset.deckId);
+      openDeckModal('rename', deckId);
+    });
+  });
+
+  listEl.querySelectorAll('.delete-deck-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const deckId = parseInt(btn.dataset.deckId);
+      openDeckModal('delete', deckId);
+    });
   });
 }
 
@@ -339,6 +192,197 @@ document.getElementById('add-deck-btn').addEventListener('click', async () => {
   if (title && title.trim()) {
     await db.decks.add({ title: title.trim(), parentId: null });
     loadDecksList();
+  }
+});
+
+// --- Deck Editor Modal ---
+async function openDeckModal(action, deckId) {
+  activeDeckAction = action;
+  activeDeckIdAction = deckId;
+
+  const modal = document.getElementById('deck-editor-modal');
+  const title = document.getElementById('deck-modal-title');
+  const renameSection = document.getElementById('deck-rename-section');
+  const deleteSection = document.getElementById('deck-delete-section');
+  const deckNameInput = document.getElementById('deck-name-input');
+
+  const deck = await db.decks.get(deckId);
+
+  if (action === 'rename') {
+    title.textContent = 'Rename Deck';
+    renameSection.style.display = 'block';
+    deleteSection.style.display = 'none';
+    deckNameInput.value = deck.title;
+  } else {
+    title.textContent = 'Delete Deck';
+    renameSection.style.display = 'none';
+    deleteSection.style.display = 'block';
+  }
+
+  modal.style.display = 'flex';
+}
+
+function closeDeckModal() {
+  document.getElementById('deck-editor-modal').style.display = 'none';
+  activeDeckAction = null;
+  activeDeckIdAction = null;
+}
+
+document.getElementById('rename-deck-btn').addEventListener('click', async () => {
+  const newTitle = document.getElementById('deck-name-input').value.trim();
+  if (newTitle) {
+    await db.decks.update(activeDeckIdAction, { title: newTitle });
+    showToast('Deck renamed!');
+    closeDeckModal();
+    loadDecksList();
+  }
+});
+
+document.getElementById('confirm-delete-deck-btn').addEventListener('click', async () => {
+  await db.transaction('rw', db.decks, db.cards, async () => {
+    await db.cards.where('deckId').equals(activeDeckIdAction).delete();
+    await db.decks.delete(activeDeckIdAction);
+  });
+  showToast('Deck deleted!');
+  closeDeckModal();
+  loadDecksList();
+});
+
+document.getElementById('cancel-deck-action-btn').addEventListener('click', closeDeckModal);
+
+
+// --- Browse View ---
+async function showBrowseView(deckId) {
+  activeDeckId = deckId;
+  const deck = await db.decks.get(deckId);
+  document.getElementById('browse-deck-title').textContent = deck.title;
+  showView('browse');
+}
+
+async function loadBrowseList() {
+  const searchTerm = document.getElementById('browse-search').value.toLowerCase();
+  let query = db.cards.where('deckId').equals(activeDeckId);
+
+  const cards = await query.toArray();
+  const filteredCards = cards.filter(card => {
+    if (!searchTerm) return true;
+    return (card.front || card.content || card.summary || '').toLowerCase().includes(searchTerm);
+  });
+
+  const listEl = document.getElementById('browse-list');
+  if (filteredCards.length === 0) {
+    listEl.innerHTML = '<p>No cards found.</p>';
+    return;
+  }
+
+  listEl.innerHTML = filteredCards.map(card => `
+    <div class="browse-item" data-card-id="${card.id}">
+      <div class="browse-item-content">${getCardPreview(card)}</div>
+    </div>
+  `).join('');
+
+  listEl.querySelectorAll('.browse-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const cardId = parseInt(item.dataset.cardId);
+      openEditorModal(cardId);
+    });
+  });
+}
+
+function getCardPreview(card) {
+  switch (card.type) {
+    case 'cloze': return card.content.replace(/{{c\d+::(.*?)}}/g, '<strong>$1</strong>');
+    case 'clinical': return `<strong>${card.question}</strong>: ${card.answer}`;
+    default: return `<strong>${card.front}</strong>: ${card.back}`;
+  }
+}
+
+document.getElementById('back-to-decks').addEventListener('click', () => showView('decks'));
+document.getElementById('browse-search').addEventListener('input', loadBrowseList);
+
+// --- Editor Modal ---
+async function openEditorModal(cardId) {
+  activeEditingCardId = cardId;
+  const card = await db.cards.get(cardId);
+  const formContainer = document.getElementById('editor-form-container');
+
+  let formHtml = `
+    <label>Tags (comma-separated)</label>
+    <input type="text" id="edit-tags" value="${(card.tags || []).join(', ')}">
+  `;
+
+  switch (card.type) {
+    case 'basic':
+      formHtml += `
+        <label>Front</label><textarea id="edit-front">${card.front}</textarea>
+        <label>Back</label><textarea id="edit-back">${card.back}</textarea>
+      `;
+      break;
+    case 'cloze':
+      formHtml += `<label>Content</label><textarea id="edit-content">${card.content}</textarea>`;
+      break;
+    case 'clinical':
+      formHtml += `
+        <label>Summary</label><textarea id="edit-summary">${card.summary}</textarea>
+        <label>Question</label><textarea id="edit-question">${card.question}</textarea>
+        <label>Answer</label><textarea id="edit-answer">${card.answer}</textarea>
+        <label>Explanation</label><textarea id="edit-explanation">${card.explanation || ''}</textarea>
+      `;
+      break;
+  }
+
+  formContainer.innerHTML = formHtml;
+  document.getElementById('editor-modal').style.display = 'flex';
+}
+
+function closeEditorModal() {
+  document.getElementById('editor-modal').style.display = 'none';
+  activeEditingCardId = null;
+}
+
+document.getElementById('save-edited-card-btn').addEventListener('click', async () => {
+  if (!activeEditingCardId) return;
+
+  const card = await db.cards.get(activeEditingCardId);
+  const updatedData = {
+    tags: document.getElementById('edit-tags').value.split(',').map(t => t.trim().toLowerCase()).filter(t => t)
+  };
+
+  switch (card.type) {
+    case 'basic':
+      updatedData.front = document.getElementById('edit-front').value;
+      updatedData.back = document.getElementById('edit-back').value;
+      break;
+    case 'cloze':
+      updatedData.content = document.getElementById('edit-content').value;
+      break;
+    case 'clinical':
+      updatedData.summary = document.getElementById('edit-summary').value;
+      updatedData.question = document.getElementById('edit-question').value;
+      updatedData.answer = document.getElementById('edit-answer').value;
+      updatedData.explanation = document.getElementById('edit-explanation').value;
+      break;
+  }
+
+  await db.cards.update(activeEditingCardId, updatedData);
+  showToast('Card saved!');
+  closeEditorModal();
+  loadBrowseList();
+});
+
+document.getElementById('delete-card-btn').addEventListener('click', async () => {
+  if (!activeEditingCardId) return;
+  if (confirm("Are you sure you want to delete this card?")) {
+    await db.cards.delete(activeEditingCardId);
+    showToast('Card deleted!');
+    closeEditorModal();
+    loadBrowseList();
+  }
+});
+
+document.getElementById('editor-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'editor-modal') {
+    closeEditorModal();
   }
 });
 
@@ -783,21 +827,21 @@ async function renderRetentionChart() {
   const days = 30;
   const data = [];
   const labels = [];
-  
+
   for (let i = days - 1; i >= 0; i--) {
     const date = new Date();
     date.setDate(date.getDate() - i);
     const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
     const end = new Date(start.getTime() + 86400000);
-    
+
     const reviews = await db.reviews
       .where('timestamp').between(start.getTime(), end.getTime())
       .toArray();
-    
-    const retention = reviews.length 
+
+    const retention = reviews.length
       ? Math.round((reviews.filter(r => r.rating >= 2).length / reviews.length) * 100)
       : 0;
-    
+
     labels.push(i === 0 ? 'Today' : i === 1 ? 'Yesterday' : date.getDate());
     data.push(retention);
   }
@@ -964,7 +1008,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const deckId = await db.decks.add({ title: "Cardiovascular System" });
     await db.cards.bulkAdd([
       {
-        deckId, front: "SA node blood supply?", back: "Right Coronary Artery (60%)", 
+        deckId, front: "SA node blood supply?", back: "Right Coronary Artery (60%)",
         due: new Date(), state: 0, stability: 0, difficulty: 0, type: 'basic', tags: ['anatomy']
       },
       {
@@ -972,11 +1016,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         due: new Date(), state: 0, stability: 0, difficulty: 0, type: 'cloze', tags: ['anatomy']
       },
       {
-        deckId, type: 'clinical', summary: "68M with crushing chest pain, BP 90/60, HR 110", 
+        deckId, type: 'clinical', summary: "68M with crushing chest pain, BP 90/60, HR 110",
         question: "Most likely diagnosis?", answer: "Inferior STEMI",
         due: new Date(), state: 0, stability: 0, difficulty: 0, tags: ['cardiology']
       }
     ]);
   }
   loadNextCard();
+});
+
+// Custom Event Listener for View Changes
+document.addEventListener('viewchange', (e) => {
+  activeView = e.detail.view;
+  switch (e.detail.view) {
+    case 'decks':
+      loadDecksList();
+      break;
+    case 'add':
+      loadDecksIntoSelect();
+      break;
+    case 'stats':
+      setTimeout(loadStatsDashboard, 300);
+      break;
+    case 'browse':
+      loadBrowseList();
+      break;
+  }
 });
