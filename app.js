@@ -21,6 +21,44 @@ let activeDeckId = null;
 let activeEditingCardId = null;
 let activeDeckAction = null;
 let activeDeckIdAction = null;
+let customSessionCards = [];
+let isCustomSessionActive = false;
+
+// --- Pell Editors ---
+const editors = {};
+
+function initEditor(id, placeholder) {
+  const editor = pell.init({
+    element: document.getElementById(id),
+    onChange: html => {},
+    defaultParagraphSeparator: 'p',
+    styleWithCSS: true,
+    actions: [
+      'bold',
+      'italic',
+      'underline',
+      'strikethrough',
+      'heading1',
+      'heading2',
+      'paragraph',
+      'quote',
+      'olist',
+      'ulist',
+      'code',
+      'line',
+      'link',
+      'image'
+    ],
+    classes: {
+      actionbar: 'pell-actionbar',
+      button: 'pell-button',
+      content: 'pell-content',
+      selected: 'pell-button-selected'
+    }
+  });
+  editor.content.setAttribute('placeholder', placeholder);
+  editors[id] = editor;
+}
 
 // --- Canvas State for Occlusion ---
 let occlusionCanvas = null;
@@ -35,6 +73,24 @@ let occlusionCurrentY = 0;
 
 // --- Load Next Card ---
 async function loadNextCard() {
+  if (isCustomSessionActive) {
+    if (customSessionCards.length > 0) {
+      const card = customSessionCards.shift();
+      activeCard = card;
+      activeCardId = card.id;
+      renderCard(card, false);
+      document.getElementById('card-inner').classList.remove('is-flipped');
+      document.getElementById('rating-controls').classList.remove('active');
+      document.getElementById('deck-title').textContent = `Custom Study (${customSessionCards.length + 1} left)`;
+    } else {
+      isCustomSessionActive = false;
+      document.getElementById('deck-title').textContent = "Today's Review";
+      showToast("Custom session complete!");
+      showView('decks');
+    }
+    return;
+  }
+
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -97,6 +153,7 @@ async function handleRate(rating) {
   });
   if (navigator.vibrate) navigator.vibrate(20);
   showToast(`Next review: ${new Date(updated.due).toLocaleDateString()}`);
+  updateStudyStreak();
   loadNextCard();
 }
 
@@ -124,22 +181,54 @@ document.querySelectorAll('.rate-btn').forEach(btn => {
 
 // --- Decks View ---
 async function loadDecksList() {
-  const tagFilter = document.getElementById('tag-filter')?.value.trim().toLowerCase() || null;
   const decks = await db.decks.toArray();
   const listEl = document.getElementById('decks-list');
+  listEl.innerHTML = '';
 
   if (decks.length === 0) {
     listEl.innerHTML = '<p>No decks yet. Tap + to create one.</p>';
     return;
   }
 
-  listEl.innerHTML = decks.map(deck => `
-    <div class="deck-item" data-deck-id="${deck.id}">
+  const deckTree = buildDeckTree(decks);
+  renderDeckTree(deckTree, listEl, 0);
+
+  // Attach event listeners after rendering
+  attachDeckEventListeners();
+}
+
+function buildDeckTree(decks) {
+  const deckMap = new Map(decks.map(deck => [deck.id, { ...deck, children: [] }]));
+  const tree = [];
+  deckMap.forEach(deck => {
+    if (deck.parentId && deckMap.has(deck.parentId)) {
+      deckMap.get(deck.parentId).children.push(deck);
+    } else {
+      tree.push(deck);
+    }
+  });
+  return tree;
+}
+
+function renderDeckTree(decks, container, level) {
+  decks.forEach(deck => {
+    const deckEl = document.createElement('div');
+    deckEl.className = 'deck-item';
+    deckEl.dataset.deckId = deck.id;
+    deckEl.style.marginLeft = `${level * 20}px`;
+
+    deckEl.innerHTML = `
       <div>
-        <div class="deck-title">${deck.title}</div>
+        <div class="deck-title">
+          ${deck.children.length > 0 ? '<ion-icon name="chevron-down-outline" class="deck-toggle"></ion-icon>' : ''}
+          ${deck.title}
+        </div>
         <div class="deck-count">Loading...</div>
       </div>
       <div class="deck-actions">
+        <button class="btn-icon add-subdeck-btn" data-deck-id="${deck.id}" title="Add Subdeck">
+          <ion-icon name="add-outline"></ion-icon>
+        </button>
         <button class="btn-icon edit-deck-btn" data-deck-id="${deck.id}" title="Edit Deck">
           <ion-icon name="create-outline"></ion-icon>
         </button>
@@ -147,29 +236,59 @@ async function loadDecksList() {
           <ion-icon name="trash-outline"></ion-icon>
         </button>
       </div>
-    </div>
-  `).join('');
+    `;
 
-  decks.forEach(async (deck) => {
-    let countQuery = db.cards.where('deckId').equals(deck.id);
-    if (tagFilter) {
-      countQuery = countQuery.and(card => card.tags && card.tags.includes(tagFilter));
+    container.appendChild(deckEl);
+
+    if (deck.children.length > 0) {
+      const childrenContainer = document.createElement('div');
+      childrenContainer.className = 'deck-children';
+      container.appendChild(childrenContainer);
+      renderDeckTree(deck.children, childrenContainer, level + 1);
     }
-    const count = await countQuery.count();
-    const deckCountEl = document.querySelector(`.deck-item[data-deck-id="${deck.id}"] .deck-count`);
-    if (deckCountEl) {
-      deckCountEl.textContent = `${count} cards`;
-    }
+
+    // Update card count
+    db.cards.where('deckId').equals(deck.id).count().then(count => {
+      deckEl.querySelector('.deck-count').textContent = `${count} cards`;
+    });
   });
+}
+
+function attachDeckEventListeners() {
+  const listEl = document.getElementById('decks-list');
 
   listEl.querySelectorAll('.deck-item').forEach(item => {
-    item.addEventListener('click', () => {
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.deck-actions') || e.target.classList.contains('deck-toggle')) {
+        return;
+      }
       const deckId = parseInt(item.dataset.deckId);
       showBrowseView(deckId);
     });
   });
 
-  // Add event listeners for edit and delete buttons
+  listEl.querySelectorAll('.deck-toggle').forEach(toggle => {
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const childrenContainer = e.target.closest('.deck-item').nextElementSibling;
+      if (childrenContainer && childrenContainer.classList.contains('deck-children')) {
+        childrenContainer.style.display = childrenContainer.style.display === 'none' ? '' : 'none';
+        toggle.name = childrenContainer.style.display === 'none' ? 'chevron-forward-outline' : 'chevron-down-outline';
+      }
+    });
+  });
+
+  listEl.querySelectorAll('.add-subdeck-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const parentId = parseInt(btn.dataset.deckId);
+      const title = prompt("Enter subdeck title:");
+      if (title && title.trim()) {
+        db.decks.add({ title: title.trim(), parentId: parentId }).then(loadDecksList);
+      }
+    });
+  });
+
   listEl.querySelectorAll('.edit-deck-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -188,13 +307,76 @@ async function loadDecksList() {
 }
 
 document.getElementById('add-deck-btn').addEventListener('click', async () => {
-  const title = prompt("Enter deck title (e.g., Pharmacology):");
+  const title = prompt("Enter deck title:");
   if (title && title.trim()) {
     await db.decks.add({ title: title.trim(), parentId: null });
     loadDecksList();
   }
 });
 
+// --- Custom Study Session ---
+async function openCustomStudyModal() {
+  const modal = document.getElementById('custom-study-modal');
+  const deckListEl = document.getElementById('custom-study-deck-list');
+  const decks = await db.decks.toArray();
+
+  deckListEl.innerHTML = decks.map(deck => `
+    <label class="deck-selection-item">
+      <input type="checkbox" name="custom-deck" value="${deck.id}">
+      ${deck.title}
+    </label>
+  `).join('');
+
+  modal.style.display = 'flex';
+}
+
+function closeCustomStudyModal() {
+  document.getElementById('custom-study-modal').style.display = 'none';
+}
+
+document.getElementById('custom-study-btn').addEventListener('click', openCustomStudyModal);
+document.getElementById('cancel-custom-study-btn').addEventListener('click', closeCustomStudyModal);
+
+document.getElementById('start-custom-study-btn').addEventListener('click', async () => {
+  const selectedDeckIds = Array.from(document.querySelectorAll('[name="custom-deck"]:checked'))
+    .map(el => parseInt(el.value));
+
+  if (selectedDeckIds.length === 0) {
+    showToast("Please select at least one deck.");
+    return;
+  }
+
+  const status = document.getElementById('custom-study-status').value;
+  const limit = parseInt(document.getElementById('custom-study-limit').value);
+
+  let query;
+  const now = new Date();
+
+  if (status === 'new') {
+    query = db.cards.where('state').equals(0);
+  } else if (status === 'learning') {
+    query = db.cards.where('state').equals(1);
+  } else if (status === 'due') {
+    query = db.cards.where('due').belowOrEqual(now);
+  } else {
+    query = db.cards;
+  }
+
+  let cards = await query.and(card => selectedDeckIds.includes(card.deckId)).toArray();
+
+  // Shuffle and limit
+  customSessionCards = cards.sort(() => 0.5 - Math.random()).slice(0, limit);
+
+  if (customSessionCards.length === 0) {
+    showToast("No matching cards found.");
+    return;
+  }
+
+  isCustomSessionActive = true;
+  closeCustomStudyModal();
+  showView('study');
+  loadNextCard();
+});
 // --- Deck Editor Modal ---
 async function openDeckModal(action, deckId) {
   activeDeckAction = action;
@@ -314,25 +496,45 @@ async function openEditorModal(cardId) {
   switch (card.type) {
     case 'basic':
       formHtml += `
-        <label>Front</label><textarea id="edit-front">${card.front}</textarea>
-        <label>Back</label><textarea id="edit-back">${card.back}</textarea>
+        <label>Front</label><div id="edit-front" class="pell-editor"></div>
+        <label>Back</label><div id="edit-back" class="pell-editor"></div>
       `;
       break;
     case 'cloze':
-      formHtml += `<label>Content</label><textarea id="edit-content">${card.content}</textarea>`;
+      formHtml += `<label>Content</label><div id="edit-content" class="pell-editor"></div>`;
       break;
     case 'clinical':
       formHtml += `
-        <label>Summary</label><textarea id="edit-summary">${card.summary}</textarea>
-        <label>Question</label><textarea id="edit-question">${card.question}</textarea>
-        <label>Answer</label><textarea id="edit-answer">${card.answer}</textarea>
-        <label>Explanation</label><textarea id="edit-explanation">${card.explanation || ''}</textarea>
+        <label>Summary</label><div id="edit-summary" class="pell-editor"></div>
+        <label>Question</label><div id="edit-question" class="pell-editor"></div>
+        <label>Answer</label><div id="edit-answer" class="pell-editor"></div>
+        <label>Explanation</label><div id="edit-explanation" class="pell-editor"></div>
       `;
       break;
   }
 
   formContainer.innerHTML = formHtml;
   document.getElementById('editor-modal').style.display = 'flex';
+
+  // Initialize editors
+  if (card.type === 'basic') {
+    initEditor('edit-front', 'Front content');
+    editors['edit-front'].content.innerHTML = card.front;
+    initEditor('edit-back', 'Back content');
+    editors['edit-back'].content.innerHTML = card.back;
+  } else if (card.type === 'cloze') {
+    initEditor('edit-content', 'Cloze content');
+    editors['edit-content'].content.innerHTML = card.content;
+  } else if (card.type === 'clinical') {
+    initEditor('edit-summary', 'Summary');
+    editors['edit-summary'].content.innerHTML = card.summary;
+    initEditor('edit-question', 'Question');
+    editors['edit-question'].content.innerHTML = card.question;
+    initEditor('edit-answer', 'Answer');
+    editors['edit-answer'].content.innerHTML = card.answer;
+    initEditor('edit-explanation', 'Explanation');
+    editors['edit-explanation'].content.innerHTML = card.explanation || '';
+  }
 }
 
 function closeEditorModal() {
@@ -350,17 +552,17 @@ document.getElementById('save-edited-card-btn').addEventListener('click', async 
 
   switch (card.type) {
     case 'basic':
-      updatedData.front = document.getElementById('edit-front').value;
-      updatedData.back = document.getElementById('edit-back').value;
+      updatedData.front = editors['edit-front'].content.innerHTML;
+      updatedData.back = editors['edit-back'].content.innerHTML;
       break;
     case 'cloze':
-      updatedData.content = document.getElementById('edit-content').value;
+      updatedData.content = editors['edit-content'].content.innerHTML;
       break;
     case 'clinical':
-      updatedData.summary = document.getElementById('edit-summary').value;
-      updatedData.question = document.getElementById('edit-question').value;
-      updatedData.answer = document.getElementById('edit-answer').value;
-      updatedData.explanation = document.getElementById('edit-explanation').value;
+      updatedData.summary = editors['edit-summary'].content.innerHTML;
+      updatedData.question = editors['edit-question'].content.innerHTML;
+      updatedData.answer = editors['edit-answer'].content.innerHTML;
+      updatedData.explanation = editors['edit-explanation'].content.innerHTML;
       break;
   }
 
@@ -590,33 +792,27 @@ document.getElementById('save-card-btn').addEventListener('click', async () => {
     let cardData = { deckId, tags, type, due: new Date(), state: 0, stability: 0, difficulty: 0 };
 
     if (type === 'basic') {
-      const front = document.getElementById('front-input').value.trim();
-      const back = document.getElementById('back-input').value.trim();
-      if (!front || !back) {
+      cardData.front = editors['front-editor'].content.innerHTML;
+      cardData.back = editors['back-editor'].content.innerHTML;
+      if (!cardData.front || !cardData.back) {
         showToast("Both front and back are required.");
         return;
       }
-      cardData.front = front;
-      cardData.back = back;
     } else if (type === 'cloze') {
-      const content = document.getElementById('cloze-input').value.trim();
-      if (!content || !/{{c\d+::/.test(content)) {
+      cardData.content = editors['cloze-editor'].content.innerHTML;
+      if (!cardData.content || !/{{c\d+::/.test(cardData.content)) {
         showToast("Cloze text must contain {{c1::...}} syntax.");
         return;
       }
-      cardData.content = content;
     } else if (type === 'clinical') {
-      const summary = document.getElementById('clinical-summary').value.trim();
-      const question = document.getElementById('clinical-question').value.trim();
-      const answer = document.getElementById('clinical-answer').value.trim();
-      if (!summary || !question || !answer) {
+      cardData.summary = editors['clinical-summary-editor'].content.innerHTML;
+      cardData.question = editors['clinical-question-editor'].content.innerHTML;
+      cardData.answer = editors['clinical-answer-editor'].content.innerHTML;
+      cardData.explanation = editors['clinical-explanation-editor'].content.innerHTML;
+      if (!cardData.summary || !cardData.question || !cardData.answer) {
         showToast("Summary, question, and answer are required.");
         return;
       }
-      cardData.summary = summary;
-      cardData.question = question;
-      cardData.answer = answer;
-      cardData.explanation = document.getElementById('clinical-explanation').value.trim();
     }
 
     await db.cards.add(cardData);
@@ -1001,8 +1197,53 @@ window.addEventListener('beforeunload', async () => {
   }
 });
 
+// --- Study Streak ---
+async function updateStudyStreak() {
+  const reviews = await db.reviews.orderBy('timestamp').toArray();
+  if (reviews.length === 0) {
+    document.getElementById('study-streak').textContent = `🔥 0 days`;
+    return;
+  }
+
+  const reviewDates = [...new Set(reviews.map(r => new Date(r.timestamp).toDateString()))];
+  let streak = 0;
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  // Check if today or yesterday is in the review dates to start the streak count
+  if (reviewDates.includes(today.toDateString()) || reviewDates.includes(yesterday.toDateString())) {
+    streak = 1;
+    let currentDate = new Date(reviewDates[reviewDates.length - 1]);
+
+    for (let i = reviewDates.length - 2; i >= 0; i--) {
+      const prevDate = new Date(reviewDates[i]);
+      const diff = (currentDate.getTime() - prevDate.getTime()) / (1000 * 3600 * 24);
+
+      if (diff === 1) {
+        streak++;
+        currentDate = prevDate;
+      } else if (diff > 1) {
+        break;
+      }
+    }
+  }
+
+  document.getElementById('study-streak').textContent = `🔥 ${streak} day${streak !== 1 ? 's' : ''}`;
+}
+
+
 // --- Init ---
 document.addEventListener('DOMContentLoaded', async () => {
+  updateStudyStreak();
+  initEditor('front-editor', 'Front of the card');
+  initEditor('back-editor', 'Back of the card');
+  initEditor('cloze-editor', 'Cloze content');
+  initEditor('clinical-summary-editor', 'Patient summary');
+  initEditor('clinical-question-editor', 'Question');
+  initEditor('clinical-answer-editor', 'Answer');
+  initEditor('clinical-explanation-editor', 'Explanation');
+
   const hasDecks = await db.decks.count();
   if (hasDecks === 0) {
     const deckId = await db.decks.add({ title: "Cardiovascular System" });
