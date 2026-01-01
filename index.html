@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#2196F3" />
+  <title>MedFlash - Medical Flashcards</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+  <script type="module" src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.esm.js"></script>
+  <script type="module" src="app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <h1 id="deck-title">Today's Review</h1>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div class="stats-pill" id="cards-due">0 Cards Due</div>
+      <button class="btn-icon" id="theme-toggle" title="Toggle theme">
+        <ion-icon name="moon-outline"></ion-icon>
+      </button>
+    </div>
+  </header>
+
+  <main id="app-container">
+    <!-- Study View -->
+    <div id="study-view" class="view active">
+      <div class="card-container" id="flashcard-wrapper">
+        <div class="card" id="card-inner">
+          <div class="card-face card-front">
+            <div class="card-content" id="front-content"></div>
+            <p class="hint">Tap to flip</p>
+          </div>
+          <div class="card-face card-back">
+            <div class="card-content" id="back-content"></div>
+          </div>
+        </div>
+      </div>
+      <div class="controls-overlay" id="rating-controls">
+        <button class="btn rate-btn red" data-rating="1">Again</button>
+        <button class="btn rate-btn orange" data-rating="2">Hard</button>
+        <button class="btn rate-btn green" data-rating="3">Good</button>
+        <button class="btn rate-btn blue" data-rating="4">Easy</button>
+      </div>
+    </div>
+
+    <!-- Decks View -->
+    <div id="decks-view" class="view">
+      <div class="header-bar">
+        <h2>My Decks</h2>
+        <div>
+          <button class="btn-icon" id="import-btn" title="Import Cards">
+            <ion-icon name="cloud-upload-outline"></ion-icon>
+          </button>
+          <button class="btn-icon" id="add-deck-btn">
+            <ion-icon name="add-outline"></ion-icon>
+          </button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <label>Daily New Cards Limit: <input type="number" id="new-limit" min="0" value="20"></label>
+        <label>Daily Reviews Limit: <input type="number" id="review-limit" min="0" value="100"></label>
+        <label>Filter by Tag: <input type="text" id="tag-filter" placeholder="e.g., cardiology"></label>
+        <button class="btn outline" id="export-btn" style="margin-top:10px;">Export All Cards (JSON)</button>
+      </div>
+      <div id="decks-list" class="list-container"></div>
+      <input type="file" id="import-file" accept=".csv,.json" style="display:none;">
+    </div>
+
+    <!-- Add Card View -->
+    <div id="add-view" class="view">
+      <div class="header-bar">
+        <h2>Add Card</h2>
+        <button class="btn small primary" id="save-card-btn">Save</button>
+      </div>
+      <div class="form-container">
+        <label>Deck</label>
+        <select id="deck-select"></select>
+
+        <label>Card Type</label>
+        <select id="card-type">
+          <option value="basic">Basic (Q&A)</option>
+          <option value="cloze">Cloze Deletion</option>
+          <option value="occlusion">Image Occlusion</option>
+          <option value="clinical">Clinical Case</option>
+        </select>
+
+        <!-- Basic Fields -->
+        <div id="basic-fields">
+          <label>Front (Question)</label>
+          <textarea id="front-input" placeholder="e.g., What supplies the SA node?"></textarea>
+          <label>Back (Answer)</label>
+          <textarea id="back-input" placeholder="e.g., Right Coronary Artery (60%)"></textarea>
+        </div>
+
+        <!-- Cloze Field -->
+        <div id="cloze-fields" style="display:none;">
+          <label>Cloze Text (use {{c1::answer}})</label>
+          <textarea id="cloze-input" placeholder="The {{c1::RCA}} supplies the {{c2::SA node}}."></textarea>
+          <div class="help-text">Example: The {{c1::right coronary artery}} supplies the SA node.</div>
+        </div>
+
+        <!-- Occlusion Field -->
+        <div id="occlusion-fields" style="display:none; margin-top:20px;">
+          <label>Upload Image</label>
+          <input type="file" id="image-upload" accept="image/*" style="width:100%; margin:10px 0;">
+          <div class="canvas-wrapper" id="occlusion-editor">
+            <canvas id="occlusion-canvas"></canvas>
+            <div id="occlusion-tools" style="display:none; margin-top:10px;">
+              <button class="btn outline" id="clear-occlusion">Clear All</button>
+            </div>
+          </div>
+          <p id="occlusion-hint" style="margin-top:10px; color:#666; font-size:0.9rem;">
+            Draw rectangles over areas to hide. Each box = one card.
+          </p>
+        </div>
+
+        <!-- Clinical Field -->
+        <div id="clinical-fields" style="display:none;">
+          <label>Patient Summary</label>
+          <textarea id="clinical-summary" placeholder="68-year-old male with..."></textarea>
+          
+          <label>Question</label>
+          <textarea id="clinical-question" placeholder="What is the most likely diagnosis?"></textarea>
+          
+          <label>Answer</label>
+          <textarea id="clinical-answer" placeholder="Inferior STEMI"></textarea>
+          
+          <label>Explanation (optional)</label>
+          <textarea id="clinical-explanation" placeholder="Due to RCA occlusion..."></textarea>
+        </div>
+
+        <label>Tags (comma-separated)</label>
+        <input type="text" id="tags-input" placeholder="e.g., anatomy, cardiology">
+      </div>
+    </div>
+
+    <!-- Stats View -->
+    <div id="stats-view" class="view">
+      <div class="header-bar">
+        <h2>Learning Analytics</h2>
+        <button class="btn small primary" id="refresh-stats">Refresh</button>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value" id="total-cards">0</div>
+          <div class="stat-label">Total Cards</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="retention-rate">0%</div>
+          <div class="stat-label">Retention</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="today-review">0</div>
+          <div class="stat-label">Reviewed Today</div>
+        </div>
+        <div class="chart-container">
+          <h3>Retention Over Time</h3>
+          <canvas id="retention-chart"></canvas>
+        </div>
+        <div class="chart-container">
+          <h3>Deck Distribution</h3>
+          <canvas id="deck-chart"></canvas>
+        </div>
+        <div class="chart-container">
+          <h3>Top Tags</h3>
+          <canvas id="tag-chart"></canvas>
+        </div>
+        <div class="chart-container">
+          <h3>Study Sessions (Last 7 Days)</h3>
+          <canvas id="session-chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <nav class="bottom-nav">
+    <div class="nav-item active" data-view="study">
+      <ion-icon name="book-outline"></ion-icon><span>Study</span>
+    </div>
+    <div class="nav-item" data-view="decks">
+      <ion-icon name="layers-outline"></ion-icon><span>Decks</span>
+    </div>
+    <div class="nav-item" data-view="add">
+      <ion-icon name="add-circle-outline"></ion-icon><span>Add</span>
+    </div>
+    <div class="nav-item" data-view="stats">
+      <ion-icon name="stats-chart-outline"></ion-icon><span>Stats</span>
+    </div>
+  </nav>
+
+  <div id="toast"></div>
+</body>
+</html>
